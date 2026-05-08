@@ -998,7 +998,7 @@
     width:28px; height:28px;
     z-index:200;
     pointer-events:none;
-    transition: transform .9s cubic-bezier(.22,1,.36,1), opacity .3s;
+    transition: transform .65s cubic-bezier(.22,1,.36,1), opacity .3s;
     will-change: transform;
     left:0; top:0;
   }
@@ -1624,7 +1624,7 @@
       </div>
       <div class="progress-track"><div class="progress-fill" id="progress-fill" style="width:0%"></div></div>
       <div class="controls">
-        <button class="ctrl-btn" id="play-btn"><span class="ico">▶</span> 自动播放</button>
+        <button class="ctrl-btn" id="play-btn"><span class="ico">▶</span> 统一播放</button>
         <button class="ctrl-btn ghost" id="restart-btn">↺ 重播本章</button>
       </div>
     </aside>
@@ -1688,11 +1688,33 @@ let selectedCity = '南京';
 
 let currentChapter = -1;
 let auto = false;
-let autoTimer = null;
+let playbackPaused = true;
 let runId = 0; // increments to abort in-flight chapter scripts
+const pendingWaits = new Set();
+const PLAYBACK_TIME_SCALE = 0.68;
+
+function scaledDelay(ms, min=120){
+  if (ms < 120) return ms;
+  return Math.max(min, Math.round(ms * PLAYBACK_TIME_SCALE));
+}
+
+function cancelPendingWaits(){
+  pendingWaits.forEach(entry => {
+    clearTimeout(entry.id);
+    entry.resolve();
+  });
+  pendingWaits.clear();
+}
+
+function cancelPlaybackRun(){
+  runId++;
+  cancelPendingWaits();
+  cursor.classList.remove('tap');
+}
 
 /* ---------- cursor helper ---------- */
 function moveCursorTo(target, opts={}){
+  const startedRun = runId;
   return new Promise(resolve => {
     const sRect = screenEl.getBoundingClientRect();
     let x, y;
@@ -1704,8 +1726,10 @@ function moveCursorTo(target, opts={}){
     } else {
       x = target.x; y = target.y;
     }
-    cursor.style.transform = `translate(${x-14}px, ${y-14}px)`;
-    setTimeout(resolve, opts.dur ?? 900);
+    if (startedRun === runId){
+      cursor.style.transform = `translate(${x-14}px, ${y-14}px)`;
+    }
+    wait(opts.dur ?? 760, {min:520}).then(resolve);
   });
 }
 
@@ -1716,13 +1740,18 @@ function tapAt(){
 }
 
 async function tap(target, opts={}){
+  const startedRun = runId;
   await moveCursorTo(target, opts);
+  if (startedRun !== runId) return false;
   await wait(120);
+  if (startedRun !== runId) return false;
   tapAt();
   await wait(opts.afterTap ?? 380);
+  return startedRun === runId;
 }
 
 async function orbitCursorAround(target, opts={}){
+  const startedRun = runId;
   const el = typeof target === 'string' ? $(target) : target;
   if (!el) return;
   const sRect = screenEl.getBoundingClientRect();
@@ -1735,6 +1764,7 @@ async function orbitCursorAround(target, opts={}){
   const delay = opts.delay ?? 26;
   const total = loops * steps;
   for (let i = 0; i <= total; i++){
+    if (startedRun !== runId) return;
     const a = (i / steps) * Math.PI * 2;
     const x = cx + Math.cos(a) * radius;
     const y = cy + Math.sin(a) * radius;
@@ -1744,6 +1774,7 @@ async function orbitCursorAround(target, opts={}){
 }
 
 async function traceCursorRect(target, opts={}){
+  const startedRun = runId;
   const el = typeof target === 'string' ? $(target) : target;
   if (!el) return;
   const sRect = screenEl.getBoundingClientRect();
@@ -1763,12 +1794,26 @@ async function traceCursorRect(target, opts={}){
   for (let y = y2; y >= y1; y -= step) points.push({x:x1, y}); // left
 
   for (const p of points){
+    if (startedRun !== runId) return;
     cursor.style.transform = `translate(${p.x-14}px, ${p.y-14}px)`;
     await wait(delay);
   }
 }
 
-function wait(ms){ return new Promise(r=>setTimeout(r,ms)); }
+function wait(ms, opts={}){
+  const delay = opts.scale === false ? ms : scaledDelay(ms, opts.min ?? 120);
+  return new Promise(resolve => {
+    const entry = {
+      id: null,
+      resolve: () => {
+        pendingWaits.delete(entry);
+        resolve();
+      }
+    };
+    entry.id = setTimeout(entry.resolve, delay);
+    pendingWaits.add(entry);
+  });
+}
 
 /* ---------- scenes show/hide ---------- */
 function showScene(id){
@@ -2045,6 +2090,7 @@ function toggleLike(el){
 
 /* ---------- per-chapter scripts ---------- */
 async function runChapter(i){
+  cancelPendingWaits();
   const myRun = ++runId;
   const ok = () => myRun === runId;
   setNarrative(i);
@@ -2344,7 +2390,7 @@ async function chapter5(ok){
   // type title
   await typeRich('#ck-title', '南京周五｜先吃饱再去看一场不熬夜的小演出', ok, 35);
   if (!ok()) return;
-  await wait(300);
+  await wait(300); if (!ok()) return;
 
   // type body
   const body = '今天的人设：「上班族 · 老土著 · 看展演出 · 咖啡自习」。\n收工先去老门东挑了笼蟹黄汤包，转角颐和路梧桐下坐到天黑。\n顺手在 Hi City! 和 Bobo 拼了 1912 街区的小演出，回程慢走收尾。';
@@ -2394,7 +2440,7 @@ function gotoChapter(i, source){
 /* ---------- scroll observer ---------- */
 const chapterEls = $$('.chapter');
 const io = new IntersectionObserver(entries => {
-  if (auto) return; // ignore scroll while auto-playing
+  if (auto || playbackPaused) return; // user exploration should not trigger scripts
   entries.forEach(e => {
     if (e.isIntersecting && e.intersectionRatio > 0.55){
       const idx = parseInt(e.target.id.replace('ch',''),10);
@@ -2408,7 +2454,10 @@ chapterEls.forEach(el => io.observe(el));
 $$('.step-row').forEach(row => {
   row.addEventListener('click', () => {
     const i = parseInt(row.dataset.ch, 10);
-    stopAuto();
+    auto = false;
+    playbackPaused = false;
+    setAutoUI(false);
+    cancelPlaybackRun();
     currentChapter = i;
     runChapter(i);
     document.getElementById('ch'+i).scrollIntoView({behavior:'smooth', block:'start'});
@@ -2418,10 +2467,11 @@ $$('.step-row').forEach(row => {
 /* ---------- auto-play ---------- */
 function setAutoUI(on){
   const btn = $('#play-btn');
-  btn.innerHTML = on ? '<span class="ico">⏸</span> 暂停' : '<span class="ico">▶</span> 自动播放';
+  btn.innerHTML = on ? '<span class="ico">⏸</span> 暂停播放' : '<span class="ico">▶</span> 统一播放';
 }
 async function startAuto(){
   if (auto) return;
+  playbackPaused = false;
   auto = true; setAutoUI(true);
   // start at current chapter
   for (let i = Math.max(0, currentChapter); i < 5 && auto; i++){
@@ -2429,12 +2479,18 @@ async function startAuto(){
     currentChapter = i;
     await runChapter(i);
     if (!auto) return;
-    await wait(1200);
+    await wait(620);
   }
-  auto = false; setAutoUI(false);
+  auto = false;
+  playbackPaused = true;
+  setAutoUI(false);
 }
 function stopAuto(){
-  auto = false; setAutoUI(false);
+  auto = false;
+  playbackPaused = true;
+  cancelPlaybackRun();
+  hideMatchBarrage();
+  setAutoUI(false);
 }
 
 $('#play-btn').addEventListener('click', () => {
@@ -2442,6 +2498,9 @@ $('#play-btn').addEventListener('click', () => {
   else startAuto();
 });
 $('#restart-btn').addEventListener('click', () => {
+  auto = false;
+  playbackPaused = false;
+  setAutoUI(false);
   runChapter(currentChapter < 0 ? 0 : currentChapter);
 });
 
@@ -2581,11 +2640,8 @@ setNarrative(0);
 showScene('s2');
 applySelectedCity();
 setRouteMode('ai');
-// run chapter 0 once on load
-setTimeout(() => {
-  currentChapter = 0;
-  runChapter(0);
-}, 600);
+currentChapter = 0;
+setAutoUI(false);
 </script>
 
 </body>
